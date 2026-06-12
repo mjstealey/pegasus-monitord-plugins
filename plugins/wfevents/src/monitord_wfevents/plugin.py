@@ -43,10 +43,10 @@ dedup), so the output is interchangeable with workflow-monitor's other JSONL
 producers. The authoritative record schema is documented in workflow-monitor's
 ``DATA_SOURCES.md``.
 
-Unlike the wfmonitor adapter (which runs alongside ``--serve``, whose
-EventLogger provides the terminal marker), this plugin emits its own
-``workflow_end`` record on ``stop()`` once the workflow has terminated — the
-marker ``workflow-monitor --remote`` keys on to end its session cleanly.
+On ``stop()``, once the workflow has terminated, the plugin emits a final
+``workflow_end`` record — the marker ``workflow-monitor --remote`` keys on to
+end its session cleanly. (First added here; the upstream wfmonitor adapter
+adopted the same behavior in workflow-monitor commit ``37828a3``.)
 """
 
 import json
