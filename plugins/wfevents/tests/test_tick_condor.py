@@ -221,4 +221,26 @@ def test_stop_final_flush(tmp_path, monkeypatch):
     assert len(_records(tmp_path, "htcondor_poll")) == 1
     assert len(_records(tmp_path, "htcondor_history")) == 1
     assert len(_records(tmp_path, "pool_status")) == 1
+    # no xwf.end seen -> no terminal marker
+    assert _records(tmp_path, "workflow_end") == []
     assert plugin._output is None  # file closed after the flush
+
+
+def test_workflow_end_is_last_after_final_flush(tmp_path, monkeypatch):
+    """The terminal marker must follow the final condor flush — a poll event
+    after workflow_end reads as a server resume to the --remote consumer."""
+    monkeypatch.setattr(mp, "query_queue", lambda **kw: [_job(status=4)])
+    monkeypatch.setattr(mp, "query_history", lambda **kw: [_job(7, status=4)])
+    monkeypatch.setattr(mp, "query_slots", lambda **kw: _FakePool(claimed=0))
+    plugin = _start(tmp_path, monkeypatch)
+    _send_wf_plan(plugin)
+    plugin.handle_event(
+        "stampede.xwf.end", {"xwf__id": "uuid-1", "ts": 1.78e9 + 50, "status": 0}
+    )
+
+    plugin.stop()
+    recs = _records(tmp_path)
+    assert recs[-1]["event_type"] == "workflow_end"
+    assert {"htcondor_poll", "htcondor_history", "pool_status"} <= {
+        r["event_type"] for r in recs[:-1]
+    }

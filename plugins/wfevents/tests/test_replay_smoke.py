@@ -38,4 +38,12 @@ def test_synthetic_run_satisfies_tui_contract(tmp_path):
 
     wf_states = [r["state"] for r in recs if r["event_type"] == "workflow_state"]
     assert wf_states == ["WORKFLOW_STARTED", "WORKFLOW_TERMINATED"]
-    assert recs[-1]["event_type"] == "workflow_state"
+
+    # the terminal marker the --remote TUI keys on to end its session
+    end = recs[-1]
+    assert end["event_type"] == "workflow_end"
+    assert end["wf_state"] == "WORKFLOW_TERMINATED"
+    assert end["wf_status"] == 0
+    assert end["total_jobs"] == 4
+    assert end["done"] == 4  # analyze failed once but its retry succeeded
+    assert end["failed"] == 0

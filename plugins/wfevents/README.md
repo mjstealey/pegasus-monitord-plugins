@@ -88,6 +88,14 @@ polled from two places.
 
 ## Behavior notes
 
+- **Terminal marker**: once the workflow terminates (`xwf.end`), the plugin's
+  `stop()` appends a final `workflow_end` record (after the last condor
+  flush) with `wf_state`/`wf_status`/`wf_end`/`total_jobs`/`done`/`failed`/
+  `elapsed`. This is what makes a `workflow-monitor --remote` session exit on
+  its own a couple of seconds after completion. No `workflow_end` is written
+  if monitord dies mid-run, so a viewer cannot be told a half-finished run
+  completed.
+
 - Condor cadence: queue polled per due tick behind an adaptive backoff;
   history at ≥ 3× the tick base (min 10 s); pool at ≥ 5× (min 15 s); one
   final flush of all three on `stop()`. Queries are always scoped to the

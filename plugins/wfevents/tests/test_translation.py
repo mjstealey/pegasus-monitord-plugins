@@ -158,6 +158,40 @@ def test_jobs_init_forced_before_first_job_state(tmp_path, monkeypatch):
     assert types.index("jobs_init") < types.index("job_state")
 
 
+def test_workflow_end_emitted_on_stop(tmp_path, monkeypatch):
+    plugin = _start(tmp_path, monkeypatch, condor_poll=False)
+    _send_wf_plan(plugin)
+    _roster(plugin, job="j1")
+    _roster(plugin, job="j2", task="ID02")
+    _ev(plugin, "static.end")
+    _ev(plugin, "xwf.start", ts=1.78e9 + 10)
+    _ev(plugin, "job_inst.main.end", job__id="j1", status=0)
+    _ev(plugin, "job_inst.main.end", job__id="j2", status=-1)
+    _ev(plugin, "job_inst.main.end", job__id="j2", status=0)  # retry succeeds
+    _ev(plugin, "xwf.end", ts=1.78e9 + 100, status=0)
+    plugin.stop()
+
+    recs = _records(tmp_path)
+    end = recs[-1]
+    assert end["event_type"] == "workflow_end"  # the LAST record
+    assert end["wf_state"] == "WORKFLOW_TERMINATED"
+    assert end["wf_status"] == 0
+    assert end["wf_end"] == 1.78e9 + 100
+    assert end["total_jobs"] == 2
+    assert end["done"] == 2  # retried j2 counts done (last terminal state wins)
+    assert end["failed"] == 0
+    assert end["elapsed"] == 90
+
+
+def test_no_workflow_end_without_termination(tmp_path, monkeypatch):
+    plugin = _start(tmp_path, monkeypatch, condor_poll=False)
+    _send_wf_plan(plugin)
+    _ev(plugin, "xwf.start", ts=1.78e9 + 10)
+    plugin.stop()  # monitord killed mid-run: no xwf.end seen
+
+    assert _records(tmp_path, "workflow_end") == []
+
+
 def test_restart_truncates_and_default_appends(tmp_path, monkeypatch):
     path = tmp_path / EVENTS_FILE
 
