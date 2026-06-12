@@ -1,0 +1,9 @@
+pegasus-monitord-plugins
+Copyright 2026 Michael J. Stealey
+
+Portions of plugins/wfevents (src/monitord_wfevents/plugin.py,
+src/monitord_wfevents/htcondor_poll.py, and parts of its test suite) are
+derived from pegasus-isi/workflow-monitor (Apache-2.0),
+commit de0c9482ec8ce5ccf9ccbd670d255d83225fe21f
+(branch monitord-plugin-adapter). See plugins/wfevents/SOURCES.md for the
+per-file provenance and the change log versus upstream.
