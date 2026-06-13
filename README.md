@@ -13,10 +13,11 @@ plugin host — branch
 [`monitord-plugin-system`](https://github.com/pegasus-isi/pegasus/tree/monitord-plugin-system)
 of pegasus-isi/pegasus:
 
-- minimum commit `f929618c649aabc3d21b96dce45ff38919578c26` (entry-point host,
+- minimum commit `25b37965e44fb6f7d950997d07a1ceb701b2a0d1` (entry-point host,
   cross-thread payload-race fix, and the `tick()` hook), branch tip at time of
-  writing `d92bbc6ce70336383890f01375d547bd9853e230` (rebased onto master
-  2026-06-12; the pre-rebase tip is tagged `monitord-plugin-system-pre-rebase`).
+  writing `ca2e6384f3b0248b840d2355274d8b77d006b886` (last rebased onto master
+  2026-06-13; each pre-rebase tip is tagged `monitord-plugin-system-pre-rebase`,
+  `…-pre-rebase-2`).
 
 Verify the host is present with the interpreter that `pegasus-monitord`
 resolves:

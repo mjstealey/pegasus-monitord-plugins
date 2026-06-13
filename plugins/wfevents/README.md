@@ -18,7 +18,7 @@ contract.
 
 - A Pegasus build with the monitord plugin host: branch
   [`monitord-plugin-system`](https://github.com/pegasus-isi/pegasus/tree/monitord-plugin-system),
-  minimum commit `f929618c649aabc3d21b96dce45ff38919578c26` (adds `tick()`,
+  minimum commit `25b37965e44fb6f7d950997d07a1ceb701b2a0d1` (adds `tick()`,
   required for `condor_poll`).
 - Python ≥ 3.9. For condor polling: the HTCondor CLI tools on `PATH`
   (subprocess fallback) or the optional `htcondor` Python bindings
