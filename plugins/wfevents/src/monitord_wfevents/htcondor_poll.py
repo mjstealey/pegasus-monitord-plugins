@@ -117,6 +117,56 @@ class CondorBackoff:
 # ─── Python bindings (preferred) ─────────────────────────────────────────────
 
 
+_EVAL_MISS = object()
+
+
+def _clean_classad_value(val: Any) -> Any:
+    """Normalize a ClassAd-evaluated value for JSON serialization.
+
+    Native JSON scalars pass through; ClassAd ``Undefined``/``Error`` sentinels
+    become None and any residual ``ExprTree`` becomes its string form, so a
+    stray expression never reaches a numeric consumer as a live object.
+    """
+    if val is None or isinstance(val, (bool, int, float, str)):
+        return val
+    if type(val).__name__ == "Value":  # classad.Value.Undefined / .Error
+        return None
+    return str(val)
+
+
+def _ad_to_dict(ad: Any) -> Dict[str, Any]:
+    """Convert a ClassAd to a plain dict with expression attributes evaluated.
+
+    ``dict(ad)`` leaves expression-valued attributes as ``classad.ExprTree``
+    objects -- notably RequestMemory, whose HTCondor default is
+    ``ifthenelse(MemoryUsage isnt undefined, MemoryUsage, (ImageSize + 1023) / 1024)``.
+    Serialized with ``json.dumps(default=str)`` those become the raw expression
+    *string*, which downstream int()/float() consumers cannot parse. Evaluating
+    each attribute in the ad's own context (``ClassAd.eval``) resolves
+    RequestMemory and friends to numbers; attributes that cannot be evaluated
+    fall back to their raw value. Non-ClassAd mappings round-trip unchanged.
+    """
+    keys_fn = getattr(ad, "keys", None)
+    if keys_fn is None:
+        return dict(ad)
+    eval_fn = getattr(ad, "eval", None)
+    out: Dict[str, Any] = {}
+    for key in list(keys_fn()):
+        val = _EVAL_MISS
+        if eval_fn is not None:
+            try:
+                val = eval_fn(key)
+            except Exception:
+                val = _EVAL_MISS
+        if val is _EVAL_MISS:
+            try:
+                val = ad[key]
+            except Exception:
+                continue
+        out[key] = _clean_classad_value(val)
+    return out
+
+
 def _try_python_bindings(
     constraint: Optional[str] = None,
     schedd_name: Optional[str] = None,
@@ -181,7 +231,7 @@ def _try_python_bindings(
             if constraint:
                 q_args["constraint"] = constraint
 
-            jobs = [dict(ad) for ad in schedd.query(**q_args)]
+            jobs = [_ad_to_dict(ad) for ad in schedd.query(**q_args)]
             return jobs
         except Exception:
             continue
@@ -397,7 +447,7 @@ def _try_history_bindings(
             if constraint:
                 h_args["constraint"] = constraint
 
-            jobs = [dict(ad) for ad in schedd.history(**h_args)]
+            jobs = [_ad_to_dict(ad) for ad in schedd.history(**h_args)]
             return jobs
         except Exception:
             continue
@@ -839,7 +889,7 @@ def _try_slots_bindings(
                 ht.AdTypes.Startd,
                 projection=_SLOT_ATTRS,
             )
-            return [dict(ad) for ad in ads]
+            return [_ad_to_dict(ad) for ad in ads]
         except Exception:
             continue
 
