@@ -35,7 +35,15 @@ extra polling thread or process::
 (Optional passthroughs for non-default pools: ``schedd``, ``collector``,
 ``token_path``, ``cert_path``, ``key_path``, ``password_file``.) When the
 plugin polls condor, start any ``workflow-monitor --serve`` with
-``--no-condor-poll`` so the two paths don't double-poll the schedd.
+``--no-condor-poll`` so the two paths don't double-poll the schedd. Also
+raise the host's stop() budget::
+
+    pegasus.monitord.plugins.wfevents.join_timeout = 60
+
+The host bounds stop() with ``join_timeout`` (default 10s) and abandons
+anything still running past it; the final condor flush needs ~42s worst
+case, so flush steps that no longer fit the remaining budget are skipped —
+the terminal ``workflow_end`` record is never sacrificed to a hung schedd.
 
 The stampede translation matches workflow-monitor's own monitord adapter, and
 the condor events match its ``EventLogger`` (same shapes, same fingerprint
@@ -47,6 +55,13 @@ On ``stop()``, once the workflow has terminated, the plugin emits a final
 ``workflow_end`` record — the marker ``workflow-monitor --remote`` keys on to
 end its session cleanly. (First added here; the upstream wfmonitor adapter
 adopted the same behavior in workflow-monitor commit ``37828a3``.)
+
+On monitord replay/recovery (``pegasus-monitord -r``, or restart after an
+unclean shutdown) the host re-emits the entire event stream and passes
+``restart=True`` to ``start()``; the plugin then truncates the output file
+instead of appending, mirroring monitord's own sinks. Setting
+``pegasus.monitord.plugins.wfevents.restart = true`` forces the same
+truncation manually (useful on older hosts that never pass the signal).
 """
 
 import json
@@ -77,6 +92,19 @@ _MIN_EPOCH_TS = 1_000_000_000
 # qualified and unqualified forms.
 STAMPEDE_NS = "stampede."
 
+# The plugin host bounds stop() with pegasus.monitord.plugins.<name>.
+# join_timeout and abandons anything still running past it (the abandoned
+# daemon thread then dies with the monitord process). The final condor flush
+# in stop() is therefore budgeted: each step runs only when its worst case
+# still fits inside join_timeout, keeping a reserve for the terminal
+# workflow_end write. Worst-case step costs mirror htcondor_poll's subprocess
+# timeouts (condor_q 10s, condor_history 15s, condor_status 15s; the bindings
+# paths are typically faster but unbounded).
+_DEFAULT_JOIN_TIMEOUT = 10.0  # keep in sync with the host's DEFAULT_JOIN_TIMEOUT
+_STOP_FLUSH_COSTS = (("queue", 10.0), ("history", 15.0), ("pool", 15.0))
+_STOP_RESERVE = 2.0  # reserved for the workflow_end write + file close
+_FULL_FLUSH_BUDGET = _STOP_RESERVE + sum(c for _, c in _STOP_FLUSH_COSTS)
+
 # Import the plugin base class from Pegasus when available (it is, inside the
 # monitord process that loads this entry point). Fall back to a duck-typed stub
 # so the module still imports where Pegasus is not installed (tests, a plain
@@ -87,7 +115,9 @@ try:
 except Exception:  # pragma: no cover - exercised only without Pegasus installed
 
     class MonitordEventPlugin:
-        def start(self, props=None):
+        event_filter = None
+
+        def start(self, props=None, restart=False):
             pass
 
         def handle_event(self, event, kw):
@@ -142,6 +172,24 @@ class WfEventsPlugin(MonitordEventPlugin):
     """Translate stampede events into workflow-monitor native JSONL records."""
 
     NAME = "wfevents"
+
+    # Host-side event filter: prefixes matched against the fully-qualified
+    # event name BEFORE the host's per-plugin payload deepcopy, so the bulk
+    # planner-roster events this plugin ignores (stampede.task.edge,
+    # stampede.job.edge) and per-invocation noise (stampede.inv.start) are
+    # never copied or queued. Hosts older than the filter support simply
+    # never read this attribute and deliver everything.
+    # KEEP IN SYNC with handle_event's dispatch: a missing prefix silently
+    # drops events (tests/test_host_contract.py guards the invariant).
+    event_filter = (
+        "stampede.wf.",  # wf.plan, wf.map.task_job
+        "stampede.xwf.",  # xwf.start, xwf.end
+        "stampede.static.",  # static.end (jobs_init trigger)
+        "stampede.job.info",  # job roster
+        "stampede.task.info",  # task roster
+        "stampede.job_inst.",  # all job-instance state transitions
+        "stampede.inv.end",  # maxrss enrichment
+    )
 
     # event name (with STAMPEDE_NS prefix) -> [status==-1 state, status==0 state].
     # Copied verbatim from Pegasus.db.workflow_loader.WorkflowLoader.jobstate so
@@ -203,6 +251,7 @@ class WfEventsPlugin(MonitordEventPlugin):
         self._condor_constraint = None  # built from wf.plan's submit_dir
         self._condor_kwargs = {}
         self._backoff = None
+        self._join_timeout = _DEFAULT_JOIN_TIMEOUT  # stop() budget (see stop())
         self._history_interval = 0.0
         self._pool_interval = 0.0
         self._history_last = 0.0
@@ -217,17 +266,33 @@ class WfEventsPlugin(MonitordEventPlugin):
 
     # ── lifecycle ──────────────────────────────────────────────────────────────
 
-    def start(self, props=None):
+    def start(self, props=None, restart=False, **_context):
+        # restart=True is the host's replay/recovery signal: monitord is
+        # re-emitting the ENTIRE event stream from the beginning of
+        # dagman.out, so durable output must truncate, not append -- the same
+        # decision monitord's own file sink makes. The cfg key is the manual
+        # override; either one truncates. The host passes restart only to
+        # start() overrides that name it; **_context keeps future host
+        # context keywords from breaking this signature.
         cfg = {}
         if props is not None:
             cfg = props.propertyset(
                 f"pegasus.monitord.plugins.{self.NAME}.", remove=True
             )
         path = cfg.get("events_path") or os.path.join(os.getcwd(), "wfevents.jsonl")
-        restart = str(cfg.get("restart", "")).lower() in ("true", "1", "yes", "on")
+        truncate = bool(restart) or str(cfg.get("restart", "")).lower() in (
+            "true",
+            "1",
+            "yes",
+            "on",
+        )
         # line-buffered so workflow-monitor's tailer sees records promptly
-        self._output = open(path, "w" if restart else "a", 1)
-        log.info("wfevents plugin writing events to %s", path)
+        self._output = open(path, "w" if truncate else "a", 1)
+        log.info(
+            "wfevents plugin writing events to %s (%s)",
+            path,
+            "truncated" if truncate else "append",
+        )
 
         self._condor_poll = str(cfg.get("condor_poll", "")).lower() in (
             "true",
@@ -266,6 +331,25 @@ class WfEventsPlugin(MonitordEventPlugin):
             # pool ~5x (>=15s).
             self._history_interval = max(base * 3, 10.0)
             self._pool_interval = max(base * 5, 15.0)
+            # stop() budget: the host abandons stop() after join_timeout, so
+            # the final flush must fit inside it (see _STOP_FLUSH_COSTS).
+            try:
+                self._join_timeout = float(
+                    cfg.get("join_timeout", _DEFAULT_JOIN_TIMEOUT)
+                )
+            except (TypeError, ValueError):
+                self._join_timeout = _DEFAULT_JOIN_TIMEOUT
+            if self._join_timeout < _FULL_FLUSH_BUDGET:
+                log.warning(
+                    "wfevents condor_poll is enabled but pegasus.monitord."
+                    "plugins.%s.join_timeout (%.0fs) is below the worst-case "
+                    "final condor flush (~%.0fs); flush steps that do not "
+                    "fit the budget will be skipped at stop() -- set "
+                    "join_timeout = 60 to guarantee the full flush",
+                    self.NAME,
+                    self._join_timeout,
+                    _FULL_FLUSH_BUDGET,
+                )
             # Module-level copies of EventLogger's stateless fingerprint
             # helpers, so dedup semantics match the polling path exactly.
             self._fp_jobs = _condor_fingerprint
@@ -282,20 +366,45 @@ class WfEventsPlugin(MonitordEventPlugin):
     def stop(self):
         # Final condor flush (workflow-monitor --serve parity: one last
         # queue/history/pool poll after the workflow completes, so terminal
-        # ClassAds are captured). Runs on monitord's main thread strictly after the worker
-        # thread has been joined, so it cannot race tick()/handle_event.
-        # Bounded: the condor subprocess timeouts cap each call, and a schedd
-        # already in backoff (fail_streak > 0) skips history/pool entirely.
+        # ClassAds are captured). The plugin host runs stop() on a bounded
+        # helper thread, strictly after the worker thread has been joined (it
+        # skips stop() when that join failed), so it cannot race tick()/
+        # handle_event -- but anything still running after join_timeout is
+        # abandoned and dies with the monitord process. Each flush step
+        # therefore runs only when its worst case (the condor subprocess
+        # timeout) still fits the remaining budget, keeping _STOP_RESERVE for
+        # the workflow_end record below; a schedd already in backoff
+        # (fail_streak > 0) skips history/pool entirely.
         if (
             self._condor_poll
             and self._output is not None
             and self._condor_constraint is not None
         ):
             try:
-                now = time.monotonic()
-                self._poll_queue(now)
-                self._poll_history(now, force=True)
-                self._poll_pool(now, force=True)
+                deadline = time.monotonic() + max(
+                    self._join_timeout - _STOP_RESERVE, 0.0
+                )
+                skipped = []
+                for step, cost in _STOP_FLUSH_COSTS:
+                    now = time.monotonic()
+                    if now + cost > deadline:
+                        skipped.append(step)
+                        continue
+                    if step == "queue":
+                        self._poll_queue(now)
+                    elif step == "history":
+                        self._poll_history(now, force=True)
+                    else:
+                        self._poll_pool(now, force=True)
+                if skipped:
+                    log.warning(
+                        "wfevents final condor flush skipped the %s poll(s): "
+                        "join_timeout (%.0fs) cannot cover their worst case; "
+                        "set pegasus.monitord.plugins.%s.join_timeout = 60",
+                        "/".join(skipped),
+                        self._join_timeout,
+                        self.NAME,
+                    )
             except Exception:
                 log.error(
                     "wfevents final condor flush failed: %s",

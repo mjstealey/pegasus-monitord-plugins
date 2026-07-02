@@ -244,3 +244,71 @@ def test_workflow_end_is_last_after_final_flush(tmp_path, monkeypatch):
     assert {"htcondor_poll", "htcondor_history", "pool_status"} <= {
         r["event_type"] for r in recs[:-1]
     }
+
+
+# --------------------------------------------------------------------------- #
+# stop() flush budget: the host abandons stop() after join_timeout, so the
+# flush must never spend the time reserved for the workflow_end record
+# --------------------------------------------------------------------------- #
+
+
+def _budget_fakes(monkeypatch, calls):
+    monkeypatch.setattr(
+        mp, "query_queue", lambda **kw: calls.append("queue") or [_job(status=4)]
+    )
+    monkeypatch.setattr(mp, "query_history", lambda **kw: calls.append("history") or [])
+    monkeypatch.setattr(
+        mp, "query_slots", lambda **kw: calls.append("pool") or _FakePool(claimed=0)
+    )
+
+
+def test_stop_flush_skipped_when_budget_too_small(tmp_path, monkeypatch, caplog):
+    """At the host-default join_timeout (10s) no flush step's worst case fits:
+    all polls are skipped and the terminal workflow_end still lands."""
+    calls = []
+    _budget_fakes(monkeypatch, calls)
+    plugin = _start(tmp_path, monkeypatch, join_timeout=None)  # host default
+    _send_wf_plan(plugin)
+    plugin.handle_event(
+        "stampede.xwf.end", {"xwf__id": "uuid-1", "ts": 1.78e9 + 50, "status": 0}
+    )
+    with caplog.at_level("WARNING", logger="monitord_wfevents.plugin"):
+        plugin.stop()
+    assert calls == []
+    recs = _records(tmp_path)
+    assert recs[-1]["event_type"] == "workflow_end"
+    assert any("skipped" in r.message for r in caplog.records)
+
+
+def test_stop_flush_partial_budget_runs_queue_only(tmp_path, monkeypatch):
+    """join_timeout=15 fits the queue poll's worst case (10s) but not
+    history/pool (15s each)."""
+    calls = []
+    _budget_fakes(monkeypatch, calls)
+    plugin = _start(tmp_path, monkeypatch, join_timeout="15")
+    _send_wf_plan(plugin)
+    plugin.stop()
+    assert calls == ["queue"]
+    assert len(_records(tmp_path, "htcondor_poll")) == 1
+    assert _records(tmp_path, "htcondor_history") == []
+    assert _records(tmp_path, "pool_status") == []
+
+
+def test_stop_flush_slow_step_consumes_budget(tmp_path, monkeypatch):
+    """A queue poll that stalls (hung schedd) eats the budget; the later
+    steps must be skipped instead of running past join_timeout."""
+    ft = _FakeTime()
+    monkeypatch.setattr(mp, "time", ft)
+    calls = []
+    _budget_fakes(monkeypatch, calls)
+
+    def slow_queue(**kw):
+        calls.append("queue")
+        ft.mono += 50.0  # stall: budget 58 (join_timeout 60) -> 8s left
+        return [_job(status=4)]
+
+    monkeypatch.setattr(mp, "query_queue", slow_queue)
+    plugin = _start(tmp_path, monkeypatch)  # conftest default join_timeout=60
+    _send_wf_plan(plugin)
+    plugin.stop()
+    assert calls == ["queue"]  # 8s remaining < history/pool worst case

@@ -15,9 +15,15 @@ of pegasus-isi/pegasus:
 
 - minimum commit `25b37965e44fb6f7d950997d07a1ceb701b2a0d1` (entry-point host,
   cross-thread payload-race fix, and the `tick()` hook), branch tip at time of
-  writing `ca2e6384f3b0248b840d2355274d8b77d006b886` (last rebased onto master
-  2026-06-13; each pre-rebase tip is tagged `monitord-plugin-system-pre-rebase`,
+  writing `e7da14941d26708237ad3bc65ccd07e05d7dace5` (2026-07-02: `restart`
+  signal to `start()`, event filtering (`event_filter` / `.events`),
+  `overflow_policy`, enabled-gated activation — on top of `b195776b7`'s deep
+  payload snapshot and bounded `start()`/`stop()`; last rebased onto master
+  2026-06-13, each pre-rebase tip is tagged `monitord-plugin-system-pre-rebase`,
   `…-pre-rebase-2`).
+- hosts older than the tip (but at or past the minimum commit) still run these
+  plugins and degrade gracefully: `restart` is simply never passed and every
+  event is delivered.
 
 Verify the host is present with the interpreter that `pegasus-monitord`
 resolves:

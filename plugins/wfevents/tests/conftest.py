@@ -70,13 +70,31 @@ def _job(cluster=1, status=2, host="work1"):
     }
 
 
-def _start(tmp_path, monkeypatch, condor_poll=True, tick_interval="5"):
+def _start(
+    tmp_path,
+    monkeypatch,
+    condor_poll=True,
+    tick_interval="5",
+    host_restart=None,
+    **extra,
+):
     cfg = {"events_path": str(tmp_path / EVENTS_FILE)}
     if condor_poll:
         cfg["condor_poll"] = "true"
         cfg["tick_interval"] = tick_interval
+        # the recommended production setting: fits the worst-case stop() flush
+        cfg["join_timeout"] = "60"
+    # extra cfg keys override; None means "leave unset" (host-default behavior)
+    for key, val in extra.items():
+        if val is None:
+            cfg.pop(key, None)
+        else:
+            cfg[key] = val
     plugin = WfEventsPlugin()
-    plugin.start(_Props(cfg))
+    if host_restart is None:
+        plugin.start(_Props(cfg))  # old-host call shape: props only
+    else:
+        plugin.start(_Props(cfg), restart=host_restart)
     return plugin
 
 

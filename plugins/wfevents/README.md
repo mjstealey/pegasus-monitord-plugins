@@ -19,7 +19,9 @@ contract.
 - A Pegasus build with the monitord plugin host: branch
   [`monitord-plugin-system`](https://github.com/pegasus-isi/pegasus/tree/monitord-plugin-system),
   minimum commit `25b37965e44fb6f7d950997d07a1ceb701b2a0d1` (adds `tick()`,
-  required for `condor_poll`).
+  required for `condor_poll`). The replay/recovery `restart` signal and
+  host-side event filtering need branch commit `e7da14941` (2026-07-02) or
+  newer; the plugin degrades gracefully without them.
 - Python ≥ 3.9. For condor polling: the HTCondor CLI tools on `PATH`
   (subprocess fallback) or the optional `htcondor` Python bindings
   (`pip install 'pegasus-monitord-plugin-wfevents[htcondor]'`).
@@ -50,19 +52,23 @@ pegasus.monitord.plugins.wfevents.events_path = /abs/path/to/run/wfevents.jsonl
 # optional: poll HTCondor from inside monitord via the plugin host's tick()
 pegasus.monitord.plugins.wfevents.tick_interval = 5
 pegasus.monitord.plugins.wfevents.condor_poll = true
+# with condor_poll: give stop() room for the final flush (worst case ~42 s)
+pegasus.monitord.plugins.wfevents.join_timeout = 60
 ```
 
 | Key (`pegasus.monitord.plugins.wfevents.`) | Default | Meaning |
 |---|---|---|
 | `enabled` | `false` | Required `true` to load the plugin (host-reserved) |
 | `events_path` | `./wfevents.jsonl` | Output JSONL path. Relative to monitord's working directory — **use an absolute path** |
-| `restart` | `false` | `true` truncates the file at start; default appends |
+| `restart` | `false` | `true` truncates the file at start; default appends. Newer hosts also signal replay/recovery via the `restart` keyword of `start()`, which truncates regardless of this key |
 | `tick_interval` | `0` | Host-reserved; > 0 enables `tick()` (seconds). Required for `condor_poll` |
 | `condor_poll` | `false` | Poll condor_q / condor_history / condor_status from `tick()`, emitting `htcondor_poll` / `htcondor_history` / `pool_status` events (fingerprint-deduped) |
 | `schedd`, `collector` | — | Non-default pool targets |
 | `token_path`, `cert_path`, `key_path`, `password_file` | — | HTCondor credential passthroughs (not needed on FS-auth pools) |
 | `queue_size` | `10000` | Host-reserved: bounded event queue, drop-on-overflow |
-| `join_timeout` | `10.0` | Host-reserved: shutdown join timeout (seconds) |
+| `join_timeout` | `10.0` | Host-reserved: bounds worker shutdown **and** `stop()`. **Set `60` with `condor_poll`** — the final flush needs ~42 s worst case; flush steps that no longer fit the budget are skipped (the terminal `workflow_end` is never sacrificed) |
+| `events` | *(unset)* | Host-reserved override of the plugin's declared event filter. **Leave unset**: the plugin already filters to exactly the events it translates; overriding can silently disable condor polling (`wf.plan` carries the submit dir) or the job roster |
+| `overflow_policy` | `drop-newest` | Host-reserved. Leave the default: `drop-oldest` can evict roster events during the startup burst, truncating `jobs_init` |
 
 ## Consume with the workflow-monitor TUI
 
@@ -96,17 +102,33 @@ polled from two places.
   if monitord dies mid-run, so a viewer cannot be told a half-finished run
   completed.
 
+- **`stop()` is on a budget**: the plugin host bounds `stop()` with
+  `join_timeout` and abandons anything still running past it. The final
+  condor flush therefore runs each step (queue → history → pool) only if its
+  worst case — the condor CLI timeout — still fits the remaining budget,
+  always reserving time for `workflow_end`. At the host-default
+  `join_timeout = 10` the flush is skipped entirely (with a startup warning);
+  set `join_timeout = 60` with `condor_poll` to guarantee the full flush.
 - Condor cadence: queue polled per due tick behind an adaptive backoff;
   history at ≥ 3× the tick base (min 10 s); pool at ≥ 5× (min 15 s); one
-  final flush of all three on `stop()`. Queries are always scoped to the
-  workflow (a `Cmd` prefix match on the planner's submit dir) and never run
-  before `wf.plan` supplies it.
+  final flush of all three on `stop()` (budget permitting, see above).
+  Queries are always scoped to the workflow (a `Cmd` prefix match on the
+  planner's submit dir) and never run before `wf.plan` supplies it.
+- **Event filter**: the plugin declares an `event_filter` covering exactly
+  the events it translates, so newer hosts skip the bulk planner-roster
+  events (`task.edge`, `job.edge`) before the per-plugin payload copy —
+  keeping large-workflow replays cheap. Older hosts ignore the attribute and
+  deliver everything (harmless, just more copying).
 - `wf_uuid` is the first `xwf_id` seen by this plugin instance. Hierarchical
   workflows run one monitord per sub-workflow — give each its own
   `events_path`.
-- A monitord restart in append mode (the default) appends a second
-  `workflow_start` mid-file; the TUI tolerates this. `restart = true` is the
-  clean-slate knob.
+- **Replay/recovery**: when monitord re-emits the whole event stream
+  (`pegasus-monitord -r`, or recovery after an unclean shutdown), newer hosts
+  pass `restart=True` to `start()` and the plugin truncates the file —
+  mirroring monitord's own sinks, no duplicate stream. On older hosts (or a
+  plain monitord restart that only emits new events) append mode applies; a
+  second `workflow_start` mid-file is tolerated by the TUI, and
+  `restart = true` remains the manual clean-slate knob.
 - Coexists with workflow-monitor's `wfmonitor` plugin (distinct entry-point
   names and property namespaces) — just don't point both at the same
   `events_path`.

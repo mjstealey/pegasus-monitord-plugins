@@ -5,4 +5,4 @@ directly via the ``pegasus.monitord.plugins`` entry point, so this package
 init stays import-free.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
